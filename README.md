@@ -21,10 +21,22 @@ import-nppes / import-csv  ->  domains  ->  find  ->  export / serve
 pip install -e '.[dev]'
 ```
 
+## Deploy on a VPS (needed for SMTP checks)
+
+```bash
+nc -vz gmail-smtp-in.l.google.com 25        # must connect; many providers block it
+docker build -t findmyclient .
+alias fmc='docker run --rm -it -v $PWD/data:/data -p 127.0.0.1:8765:8765 findmyclient'
+fmc fetch-nppes --state TX --taxonomy 261Q && fmc domains
+fmc find --smtp --helo mail.yourco.in --mail-from verify@yourco.in
+```
+
 ## Workflow
 
 ```bash
-# 1. Load practices from files you hold. NPPES bulk file (npidata_pfile_*.csv) is read as a stream, so the
+# 1. Load practices. Either let the tool fetch the CMS file itself (extracts, imports, deletes the multi-GB CSV):
+findmyclient fetch-nppes --state TX --taxonomy 261Q
+#    ...or load files you already hold. NPPES bulk file (npidata_pfile_*.csv) is read as a stream, so the
 #    multi-GB file is fine. Filter on the way in. Authorized official (owner/CEO/administrator) becomes the contact.
 findmyclient import-nppes npidata_pfile_2026.csv --state TX --state FL --taxonomy 207R --taxonomy 261Q
 findmyclient import-csv our_crm_export.csv        # any CSV with `name` (+ optional domain, phone, city, zip, contact_first, contact_last ...)
@@ -69,8 +81,8 @@ domain match itself was only moderately confident. Verification results are cach
   most cloud hosts and many ISPs block (the tool warns and reports `unknown`, never a false `valid`). Use a VPS
   that allows it, with reverse DNS matching `--helo`. Google Workspace / Microsoft 365 often accept everything or
   throttle probes, so those come back `risky`/`unknown`. Keep `--delay` >= 1s.
-- `import-nppes` needs the bulk file on disk; get it once from CMS (public data) and keep it, nothing in this
-  tool fetches it. Individual providers (`--entity individual`) rarely have their own domain; target orgs.
+- `fetch-nppes` guesses CMS's monthly file name (`NPPES_Data_Dissemination_<Month>_<Year>.zip`, newest of the last three
+  months); that URL pattern is untested against the live site, so use `--url` or `import-nppes` if CMS renames it. Individual providers (`--entity individual`) rarely have their own domain; target orgs.
 - The dashboard binds to 127.0.0.1, rejects foreign `Host` headers, and requires a per-run token for writes.
   Don't put it behind a public proxy without adding real authentication.
 

@@ -386,3 +386,41 @@ def test_sparse_csv_attaches_domain_to_existing_npi(tmp_path):
     assert st.upsert_practices(ingest.read_csv(str(f))) == 1
     p = [x for x in st.practices() if x.npi == "1111111111"][0]
     assert (p.name, p.domain, p.domain_confidence, p.city) == ("Acme Primary Care Associates Pc", "acmepc.com", 100, "Dallas")
+
+
+# ---- nppes fetch ----
+def test_monthly_urls_roll_back_across_year():
+    import datetime
+    from findmyclient import nppes_fetch
+    urls = list(nppes_fetch.monthly_urls(datetime.date(2027, 1, 15)))
+    assert [u.rsplit("_", 2)[-2:] for u in urls] == [["January", "2027.zip"], ["December", "2026.zip"], ["November", "2026.zip"]]
+
+
+def test_fetch_extracts_main_file_not_header_and_falls_back(tmp_path):
+    import datetime
+    import zipfile
+    import urllib.error
+    from findmyclient import nppes_fetch
+    src = open(FIX, "rb").read()
+
+    def fake_open(url, dest, progress):
+        if "October" in url:
+            raise urllib.error.URLError("404 not published yet")
+        with zipfile.ZipFile(dest, "w") as z:
+            z.writestr("npidata_pfile_20050523-20260913_FileHeader.csv", "NPI\n")
+            z.writestr("npidata_pfile_20050523-20260913.csv", src)
+            z.writestr("endpoint_pfile_20050523-20260913.csv", "x\n")
+    path = nppes_fetch.fetch(str(tmp_path), today=datetime.date(2026, 10, 3), opener=fake_open)
+    assert path.endswith("npidata_pfile_20050523-20260913.csv") and not (tmp_path / "nppes.zip").exists()
+    assert len(list(ingest.read_nppes(path))) == 3
+
+
+def test_fetch_failure_names_every_url(tmp_path):
+    import urllib.error
+    from findmyclient import nppes_fetch
+
+    def boom(url, dest, progress):
+        raise urllib.error.URLError("proxy 403")
+    with pytest.raises(RuntimeError, match="download.cms.gov") as e:
+        nppes_fetch.fetch(str(tmp_path), opener=boom)
+    assert str(e.value).count("proxy 403") == 3

@@ -6,3 +6,5 @@ __pycache__/
 !tests/fixtures/*.csv
 .env
 *.db
+data/
+nppes_tmp/
