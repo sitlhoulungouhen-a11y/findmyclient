@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
-      FMC_DB: ${{ runner.temp }}/fmc.db
+      FMC_DB: fmc.db
       IN_STATE: ${{ inputs.state }}
       IN_TAXONOMY: ${{ inputs.taxonomy }}
       IN_TITLES: ${{ inputs.titles }}
