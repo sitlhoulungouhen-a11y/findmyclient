@@ -35,6 +35,16 @@ jobs:
           print("DNS works:", DnsResolver(timeout=5).mx_hosts("google.com") is not None)
           print("outbound port 25 open:", port25_open(timeout=8))
           PY
+      - name: What does CMS's download page link to? (public file names only)
+        run: |
+          python - <<'PY'
+          import re, urllib.request
+          html = urllib.request.urlopen("https://download.cms.gov/nppes/NPI_Files.html", timeout=30).read().decode("utf-8", "replace")
+          print("page bytes:", len(html))
+          for h in sorted(set(re.findall(r"href=[\"']([^\"']+)[\"']", html)))[:60]:
+              if re.search(r"\.(zip|csv)\b|NPPES", h, re.I):
+                  print(h)
+          PY
       - name: Import practices from CMS NPPES (streamed from the zip)
         run: |
           args=(--state "$IN_STATE" --taxonomy "$IN_TAXONOMY")

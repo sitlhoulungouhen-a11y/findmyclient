@@ -26,7 +26,8 @@ def monthly_urls(today: dt.date | None = None, months: int = 3) -> Iterator[str]
 
 
 INDEX_URL = BASE + "NPI_Files.html"
-_ZIP_HREF = re.compile(r'href="([^"]*NPPES_Data_Dissemination[^"]*\.zip)"', re.I)
+_ANY_ZIP = re.compile(r'href=["\']([^"\']*\.zip)["\']', re.I)
+_ZIP_HREF = re.compile(r'href=["\']([^"\']*NPPES_Data_Dissemination[^"\']*\.zip)["\']', re.I)
 _MONTHS = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"]
 
 
@@ -91,7 +92,12 @@ def fetch_zip(workdir: str, url: str | None = None, today: dt.date | None = None
     candidates = [url] if url else []
     if not url:
         try:
-            candidates = index_urls(index(INDEX_URL))[:3]
+            html = index(INDEX_URL)
+            candidates = index_urls(html)[:3]
+            if not candidates:
+                seen = _ANY_ZIP.findall(html)
+                tried.append(f"{INDEX_URL}: loaded ({len(html)} bytes) but no monthly NPPES_Data_Dissemination zip link matched; "
+                             f"zip links on page: {seen[:8] or 'none (page may be script-rendered)'}")
         except (urllib.error.URLError, OSError) as e:
             tried.append(f"{INDEX_URL}: {e}")
         candidates += [u for u in monthly_urls(today) if u not in candidates]  # last resort: guessed names
