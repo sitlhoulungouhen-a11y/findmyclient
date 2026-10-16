@@ -1,10 +1,11 @@
 """One-step NPPES acquisition: download the CMS monthly full file, pull out the npidata CSV."""
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
+import io
 import os
 import re
-import shutil
 import sys
 import urllib.error
 import urllib.request
@@ -34,21 +35,20 @@ def download(url: str, dest: str, progress: Callable[[int, int], None] | None = 
                 progress(done, total)
 
 
-def extract_npidata(zip_path: str, out_dir: str) -> str:
+@contextlib.contextmanager
+def open_npidata(zip_path: str):
+    """Text stream of the npidata CSV read directly out of the zip (the CSV is ~10 GB; never written to disk)."""
     with zipfile.ZipFile(zip_path) as z:
         members = [n for n in z.namelist() if MEMBER_RE.search(n)]
         if not members:
             raise RuntimeError(f"{zip_path}: no npidata_pfile_*.csv inside (found: {z.namelist()[:5]})")
-        member = max(members, key=lambda n: z.getinfo(n).file_size)
-        dest = os.path.join(out_dir, os.path.basename(member))
-        with z.open(member) as src, open(dest, "wb") as dst:
-            shutil.copyfileobj(src, dst, 1 << 20)
-    return dest
+        with z.open(max(members, key=lambda n: z.getinfo(n).file_size)) as raw:
+            yield io.TextIOWrapper(raw, encoding="utf-8-sig", newline="")
 
 
-def fetch(workdir: str, url: str | None = None, today: dt.date | None = None,
-          opener: Callable[[str, str, Callable | None], None] = download) -> str:
-    """Download + extract; returns path of the npidata CSV. Removes the zip afterwards."""
+def fetch_zip(workdir: str, url: str | None = None, today: dt.date | None = None,
+              opener: Callable[[str, str, Callable | None], None] = download) -> str:
+    """Download the newest available monthly zip; returns its path."""
     os.makedirs(workdir, exist_ok=True)
     zip_path = os.path.join(workdir, "nppes.zip")
 
@@ -61,13 +61,8 @@ def fetch(workdir: str, url: str | None = None, today: dt.date | None = None,
         try:
             opener(u, zip_path, bar)
             print(file=sys.stderr)
-            break
+            return zip_path
         except (urllib.error.URLError, OSError) as e:
             tried.append(f"{u}: {e}")
-    else:
-        raise RuntimeError("could not download NPPES file:\n  " + "\n  ".join(tried) +
-                           "\nCheck network access to download.cms.gov, or pass --url / use `import-nppes` on a file you have.")
-    try:
-        return extract_npidata(zip_path, workdir)
-    finally:
-        os.remove(zip_path)
+    raise RuntimeError("could not download NPPES file:\n  " + "\n  ".join(tried) +
+                       "\nCheck network access to download.cms.gov, or pass --url / use `import-nppes` on a file you have.")

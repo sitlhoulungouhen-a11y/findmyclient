@@ -1,0 +1,59 @@
+# Runs the full pipeline on a GitHub-hosted runner (which has normal internet/DNS).
+# PRIVACY: this repo may be public, so logs are public. Nothing below prints contact names or emails;
+# results are written to a short-lived artifact only.
+name: run-pipeline
+on:
+  workflow_dispatch:
+    inputs:
+      state:       { description: "2-letter state", default: "TX" }
+      taxonomy:    { description: "taxonomy code prefix", default: "261Q" }
+      titles:      { description: "comma-separated authorized-official title keywords", default: "manager,administrator" }
+      domain_limit: { description: "how many practices to probe for domains", default: "150" }
+      smtp:        { description: "probe mail servers (needs port 25; only enable if the diagnostic says it is open)", type: boolean, default: false }
+permissions:
+  contents: read
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      FMC_DB: ${{ runner.temp }}/fmc.db
+      IN_STATE: ${{ inputs.state }}
+      IN_TAXONOMY: ${{ inputs.taxonomy }}
+      IN_TITLES: ${{ inputs.titles }}
+      IN_LIMIT: ${{ inputs.domain_limit }}
+      IN_SMTP: ${{ inputs.smtp }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.13" }
+      - run: pip install .
+      - name: Network diagnostics (no data)
+        run: |
+          python - <<'PY'
+          from findmyclient.validate import DnsResolver, port25_open
+          print("DNS works:", DnsResolver(timeout=5).mx_hosts("google.com") is not None)
+          print("outbound port 25 open:", port25_open(timeout=8))
+          PY
+      - name: Import practices from CMS NPPES (streamed from the zip)
+        run: |
+          args=(--state "$IN_STATE" --taxonomy "$IN_TAXONOMY")
+          IFS=',' read -ra T <<< "$IN_TITLES"
+          for t in "${T[@]}"; do args+=(--title "$t"); done
+          findmyclient fetch-nppes "${args[@]}" --workdir "$RUNNER_TEMP/nppes"
+      - name: Find domains
+        run: findmyclient domains --limit "$IN_LIMIT" 2>&1 | tail -n 3
+      - name: Find + verify emails
+        run: |
+          flags=(--min-domain-confidence 50)
+          if [ "$IN_SMTP" = "true" ]; then flags+=(--smtp --helo "$(hostname -f)" --mail-from "verify@$(hostname -f)"); fi
+          findmyclient find "${flags[@]}" 2>&1 | tail -n 2
+      - name: Export and summarise (counts only)
+        run: |
+          findmyclient export -o leads.csv --min-score 0
+          findmyclient stats
+      - uses: actions/upload-artifact@v4
+        with:
+          name: leads
+          path: leads.csv
+          retention-days: 1

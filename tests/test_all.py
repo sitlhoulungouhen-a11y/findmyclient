@@ -396,7 +396,7 @@ def test_monthly_urls_roll_back_across_year():
     assert [u.rsplit("_", 2)[-2:] for u in urls] == [["January", "2027.zip"], ["December", "2026.zip"], ["November", "2026.zip"]]
 
 
-def test_fetch_extracts_main_file_not_header_and_falls_back(tmp_path):
+def test_fetch_streams_main_file_not_header_and_falls_back(tmp_path):
     import datetime
     import zipfile
     import urllib.error
@@ -410,9 +410,15 @@ def test_fetch_extracts_main_file_not_header_and_falls_back(tmp_path):
             z.writestr("npidata_pfile_20050523-20260913_FileHeader.csv", "NPI\n")
             z.writestr("npidata_pfile_20050523-20260913.csv", src)
             z.writestr("endpoint_pfile_20050523-20260913.csv", "x\n")
-    path = nppes_fetch.fetch(str(tmp_path), today=datetime.date(2026, 10, 3), opener=fake_open)
-    assert path.endswith("npidata_pfile_20050523-20260913.csv") and not (tmp_path / "nppes.zip").exists()
-    assert len(list(ingest.read_nppes(path))) == 3
+    zp = nppes_fetch.fetch_zip(str(tmp_path), today=datetime.date(2026, 10, 3), opener=fake_open)
+    with nppes_fetch.open_npidata(zp) as f:
+        got = list(ingest.read_nppes(f))
+    assert len(got) == 3 and sorted(os.listdir(tmp_path)) == ["nppes.zip"]  # nothing extracted to disk
+
+
+def test_title_filter():
+    assert [p.npi for p in ingest.read_nppes(FIX, titles=["administrator", "manager"])] == ["2222222222"]
+    assert [p.npi for p in ingest.read_nppes(FIX, titles=["ceo"])] == ["1111111111"]
 
 
 def test_fetch_failure_names_every_url(tmp_path):
@@ -422,5 +428,5 @@ def test_fetch_failure_names_every_url(tmp_path):
     def boom(url, dest, progress):
         raise urllib.error.URLError("proxy 403")
     with pytest.raises(RuntimeError, match="download.cms.gov") as e:
-        nppes_fetch.fetch(str(tmp_path), opener=boom)
+        nppes_fetch.fetch_zip(str(tmp_path), opener=boom)
     assert str(e.value).count("proxy 403") == 3

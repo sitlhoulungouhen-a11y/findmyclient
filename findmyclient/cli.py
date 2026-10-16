@@ -38,19 +38,21 @@ def _validator(args) -> Validator:
 
 def cmd_import_nppes(args, store: Store) -> None:
     it = ingest.read_nppes(args.file, states=args.state, cities=args.city, entity=args.entity,
-                           taxonomy_prefixes=args.taxonomy, limit=args.limit)
+                           taxonomy_prefixes=args.taxonomy, titles=args.title, limit=args.limit)
     _eprint(f"{store.upsert_practices(it)} practices imported (filters: state={args.state or 'any'} entity={args.entity} "
             f"taxonomy={args.taxonomy or 'any'})")
 
 
 def cmd_fetch_nppes(args, store: Store) -> None:
-    path = nppes_fetch.fetch(args.workdir, url=args.url)
+    zip_path = nppes_fetch.fetch_zip(args.workdir, url=args.url)
     try:
-        cmd_import_nppes(argparse.Namespace(file=path, state=args.state, city=args.city, entity=args.entity,
-                                            taxonomy=args.taxonomy, limit=args.limit), store)
+        with nppes_fetch.open_npidata(zip_path) as f:
+            it = ingest.read_nppes(f, states=args.state, cities=args.city, entity=args.entity,
+                                   taxonomy_prefixes=args.taxonomy, titles=args.title, limit=args.limit)
+            _eprint(f"{store.upsert_practices(it)} practices imported")
     finally:
         if not args.keep:
-            os.remove(path)  # the extracted file is several GB
+            os.remove(zip_path)
 
 
 def cmd_import_csv(args, store: Store) -> None:
@@ -181,6 +183,7 @@ def main(argv=None) -> None:
     p.add_argument("--city", action="append", default=[])
     p.add_argument("--entity", choices=["org", "individual", "both"], default="org")
     p.add_argument("--taxonomy", action="append", default=[], help="taxonomy code prefix, e.g. 207R (internal medicine), 261Q (clinics)")
+    p.add_argument("--title", action="append", default=[], help="authorized-official title contains, e.g. manager, administrator")
     p.add_argument("--limit", type=int)
 
     p = add("fetch-nppes", cmd_fetch_nppes, "download the CMS NPPES monthly file and import it (needs access to download.cms.gov)")
@@ -188,10 +191,11 @@ def main(argv=None) -> None:
     p.add_argument("--city", action="append", default=[])
     p.add_argument("--entity", choices=["org", "individual", "both"], default="org")
     p.add_argument("--taxonomy", action="append", default=[])
+    p.add_argument("--title", action="append", default=[], help="authorized-official title contains, e.g. manager, administrator")
     p.add_argument("--limit", type=int)
     p.add_argument("--url", help="override the CMS zip URL")
     p.add_argument("--workdir", default="nppes_tmp")
-    p.add_argument("--keep", action="store_true", help="keep the extracted CSV (several GB)")
+    p.add_argument("--keep", action="store_true", help="keep the downloaded zip (~1 GB)")
 
     p = add("import-csv", cmd_import_csv, "load practices from your own CSV (CRM export, purchased list); add a `domain` column if you have it")
     p.add_argument("file")

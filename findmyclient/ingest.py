@@ -48,57 +48,70 @@ def _taxonomy(row: dict[str, str]) -> str:
     return row.get("Healthcare Provider Taxonomy Code_1", "")
 
 
-def read_nppes(
-    path: str,
+def read_nppes(source, **filters) -> Iterator[Practice]:
+    """Stream the multi-GB NPPES file (a path, or an open text stream such as one read straight out of the zip)."""
+    if isinstance(source, str):
+        with open(source, newline="", encoding="utf-8-sig") as f:
+            yield from _parse_nppes(f, source, **filters)
+    else:
+        yield from _parse_nppes(source, "NPPES stream", **filters)
+
+
+def _parse_nppes(
+    lines: Iterable[str],
+    source_name: str,
     *,
     states: Iterable[str] = (),
     cities: Iterable[str] = (),
     entity: str = "org",
     taxonomy_prefixes: Iterable[str] = (),
+    titles: Iterable[str] = (),
     limit: int | None = None,
 ) -> Iterator[Practice]:
-    """Stream the multi-GB NPPES file, yielding only records that match the filters."""
+    """Yield only records matching the filters. `titles` matches the authorized official's title (substring)."""
+    titles = tuple(t.lower() for t in titles)
     states = {s.upper() for s in states}
     cities = {c.upper() for c in cities}
     prefixes = tuple(p.upper() for p in taxonomy_prefixes)
     wanted = {"org": {"2"}, "individual": {"1"}, "both": {"1", "2"}}[entity]
     n = 0
-    with open(path, newline="", encoding="utf-8-sig") as f:
-        rd = csv.DictReader(f)
-        missing = [_NPPES[k] for k in _REQUIRED if _NPPES[k] not in (rd.fieldnames or [])]
-        if missing:
-            raise ValueError(f"{path} doesn't look like an NPPES npidata file; missing columns: {missing}")
-        for row in rd:
-            g = {k: (row.get(col) or "").strip() for k, col in _NPPES.items()}
-            if g["etype"] not in wanted:
-                continue
-            if g["deact"] and not g["react"]:
-                continue
-            if states and g["state"].upper() not in states:
-                continue
-            if cities and g["city"].upper() not in cities:
-                continue
-            tax = _taxonomy(row)
-            if prefixes and not tax.upper().startswith(prefixes):
-                continue
-            org = g["etype"] == "2"
-            if org:
-                name, cf, cl, ct = _title(g["org"]), _title(g["ao_first"]), _title(g["ao_last"]), _title(g["ao_title"])
-            else:
-                name = " ".join(x for x in (_title(g["first"]), _title(g["last"])) if x)
-                if g["cred"]:
-                    name += f", {g['cred']}"
-                cf, cl, ct = _title(g["first"]), _title(g["last"]), ""
-            if not name:
-                continue
-            yield Practice(
-                npi=g["npi"], kind="org" if org else "individual", name=name, specialty=label(tax), taxonomy=tax,
-                address=_title(g["addr"]), city=_title(g["city"]), state=g["state"].upper(), zip=g["zip"][:5],
-                phone=_digits(g["phone"]), contact_first=cf, contact_last=cl, contact_title=ct,
-            )
-            n += 1
-            if limit and n >= limit:
-                return
+    rd = csv.DictReader(lines)
+    missing = [_NPPES[k] for k in _REQUIRED if _NPPES[k] not in (rd.fieldnames or [])]
+    if missing:
+        raise ValueError(f"{source_name} doesn't look like an NPPES npidata file; missing columns: {missing}")
+    for row in rd:
+        g = {k: (row.get(col) or "").strip() for k, col in _NPPES.items()}
+        if g["etype"] not in wanted:
+            continue
+        if g["deact"] and not g["react"]:
+            continue
+        if states and g["state"].upper() not in states:
+            continue
+        if cities and g["city"].upper() not in cities:
+            continue
+        if titles and not any(t in g["ao_title"].lower() for t in titles):
+            continue
+        tax = _taxonomy(row)
+        if prefixes and not tax.upper().startswith(prefixes):
+            continue
+        org = g["etype"] == "2"
+        if org:
+            name, cf, cl, ct = _title(g["org"]), _title(g["ao_first"]), _title(g["ao_last"]), _title(g["ao_title"])
+        else:
+            name = " ".join(x for x in (_title(g["first"]), _title(g["last"])) if x)
+            if g["cred"]:
+                name += f", {g['cred']}"
+            cf, cl, ct = _title(g["first"]), _title(g["last"]), ""
+        if not name:
+            continue
+        yield Practice(
+            npi=g["npi"], kind="org" if org else "individual", name=name, specialty=label(tax), taxonomy=tax,
+            address=_title(g["addr"]), city=_title(g["city"]), state=g["state"].upper(), zip=g["zip"][:5],
+            phone=_digits(g["phone"]), contact_first=cf, contact_last=cl, contact_title=ct,
+        )
+        n += 1
+        if limit and n >= limit:
+            return
 
 
 def read_csv(path: str) -> Iterator[Practice]:
