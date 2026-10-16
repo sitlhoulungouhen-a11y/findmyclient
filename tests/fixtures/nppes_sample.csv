@@ -1,0 +1,6 @@
+NPI,Entity Type Code,Provider Organization Name (Legal Business Name),Provider Last Name (Legal Name),Provider First Name,Provider Credential Text,Provider First Line Business Practice Location Address,Provider Business Practice Location Address City Name,Provider Business Practice Location Address State Name,Provider Business Practice Location Address Postal Code,Provider Business Practice Location Address Telephone Number,Healthcare Provider Taxonomy Code_1,Healthcare Provider Primary Taxonomy Switch_1,Healthcare Provider Taxonomy Code_2,Healthcare Provider Primary Taxonomy Switch_2,Authorized Official Last Name,Authorized Official First Name,Authorized Official Title or Position,NPI Deactivation Date,NPI Reactivation Date
+1111111111,2,ACME PRIMARY CARE ASSOCIATES PC,,,,100 MAIN ST,DALLAS,TX,752010000,2145550100,261QP2300X,N,207R00000X,Y,DOE,JANE,CEO,,
+2222222222,2,BAYOU CLINIC LLC,,,,5 RIVER RD,HOUSTON,TX,77002,7135550111,261Q00000X,Y,,,SMITH,BOB,ADMINISTRATOR,,
+3333333333,2,OLD CLINIC INC,,,,1 X ST,AUSTIN,TX,78701,5125550122,261Q00000X,Y,,,ROE,RICH,OWNER,01/01/2020,
+4444444444,2,SUNSHINE FAMILY MEDICINE,,,,9 PALM AVE,MIAMI,FL,33101,3055550133,207Q00000X,Y,,,LEE,ANN,OWNER,,
+5555555555,1,,NGUYEN,TAM,MD,2 ELM ST,DALLAS,TX,75201,2145550144,207R00000X,Y,,,,,,,

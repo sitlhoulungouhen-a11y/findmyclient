@@ -1,9 +1,9 @@
 import pytest
 
-from findmyclient import npi, patterns, scrape
-from findmyclient.domains import discover_domain, is_directory, normalize_domain
+from findmyclient.models import Validation
+
+from findmyclient import patterns, scrape
 from findmyclient.models import Practice
-from findmyclient.pipeline import process_practice
 from findmyclient.validate import Validator
 
 
@@ -120,44 +120,111 @@ def test_scrape_dead_site():
     assert scrape.scrape_domain("dead.com", fetch=lambda u: None) == {}
 
 
-# ---- domains ----
-def test_domains():
-    assert normalize_domain("https://www.Clinic.com/about") == "clinic.com"
-    assert normalize_domain("") == ""
-    assert is_directory("www.healthgrades.com") and not is_directory("clinic.com")
-    p = Practice("1", "org", "Acme Clinic", city="Austin", state="TX")
-    assert discover_domain(p, lambda q: ["https://www.yelp.com/x", "https://acmeclinic.com/"]) == "acmeclinic.com"
+# ---- ingest ----
+import os
+import threading
+import urllib.error
+import urllib.parse
+import urllib.request
+
+from findmyclient import domainprobe, ingest
+from findmyclient.pipeline import Hooks, process_practice
+from findmyclient.store import Store
+from findmyclient.webui import make_handler
+
+FIX = os.path.join(os.path.dirname(__file__), "fixtures", "nppes_sample.csv")
 
 
-# ---- npi ----
-ORG = {"number": 1234567890, "enumeration_type": "NPI-2",
-       "basic": {"organization_name": "ACME PRIMARY CARE LLC", "authorized_official_first_name": "JANE",
-                 "authorized_official_last_name": "DOE", "authorized_official_title_or_position": "CEO"},
-       "addresses": [{"address_purpose": "MAILING", "city": "X"},
-                     {"address_purpose": "LOCATION", "address_1": "1 MAIN ST", "city": "DALLAS", "state": "TX",
-                      "postal_code": "752010000", "telephone_number": "214-555-0100"}],
-       "taxonomies": [{"desc": "Internal Medicine", "primary": True}]}
+def test_nppes_filters():
+    allrows = list(ingest.read_nppes(FIX))
+    assert [p.npi for p in allrows] == ["1111111111", "2222222222", "4444444444"]  # orgs only; deactivated dropped
+    tx = list(ingest.read_nppes(FIX, states=["tx"]))
+    assert [p.npi for p in tx] == ["1111111111", "2222222222"]
+    im = list(ingest.read_nppes(FIX, taxonomy_prefixes=["207R"]))  # primary-switch taxonomy, not code_1
+    assert [p.npi for p in im] == ["1111111111"] and im[0].specialty == "Internal Medicine"
+    ind = list(ingest.read_nppes(FIX, entity="individual"))
+    assert ind[0].name == "Tam Nguyen, MD" and ind[0].contact_last == "Nguyen"
+    a = allrows[0]
+    assert (a.name, a.contact_first, a.contact_title, a.zip, a.phone, a.city) == (
+        "Acme Primary Care Associates Pc", "Jane", "Ceo", "75201", "2145550100", "Dallas")
 
 
-def test_npi_parse_and_paging():
-    pages = []
-
-    def fetch(url):
-        pages.append(url)
-        return {"results": [ORG] * 200} if len(pages) == 1 else {"results": [ORG] * 5}
-
-    out = list(npi.search(state="TX", limit=300, fetch=fetch))
-    assert len(out) == 205 and len(pages) == 2 and "skip=200" in pages[1]
-    p = out[0]
-    assert (p.name, p.contact_first, p.contact_title, p.city, p.zip, p.specialty) == (
-        "Acme Primary Care Llc", "Jane", "Cto".replace("Cto", "Ceo"), "Dallas", "75201", "Internal Medicine")
+def test_nppes_wrong_file():
+    with pytest.raises(ValueError, match="NPPES"):
+        list(ingest.read_nppes(os.path.join(os.path.dirname(__file__), "fixtures", "bad.csv")))
 
 
-def test_npi_errors_and_filters():
-    with pytest.raises(ValueError):
-        list(npi.search())
-    with pytest.raises(RuntimeError, match="bad"):
-        list(npi.search(state="TX", fetch=lambda u: {"Errors": [{"description": "bad"}]}))
+def test_csv_import_stable_ids(tmp_path):
+    f = tmp_path / "crm.csv"
+    f.write_text("name,zip,phone,domain,contact_first,contact_last\nAcme Clinic,75201,(214) 555-0100,acme.com,Jane,Doe\n")
+    a, b = list(ingest.read_csv(str(f))), list(ingest.read_csv(str(f)))
+    assert a[0].npi == b[0].npi and a[0].npi.startswith("local-")
+    assert (a[0].phone, a[0].domain, a[0].domain_source, a[0].domain_confidence) == ("2145550100", "acme.com", "imported", 100)
+
+
+# ---- store ----
+def test_store_roundtrip_and_domain_not_clobbered(tmp_path):
+    st = Store(str(tmp_path / "t.db"))
+    st.upsert_practices(ingest.read_nppes(FIX))
+    assert st.stats()["practices"] == 3
+    st.set_domain("1111111111", "acmepc.com", "probed", 75)
+    st.upsert_practices(ingest.read_nppes(FIX))  # re-import must keep the found domain
+    p = [x for x in st.practices() if x.npi == "1111111111"][0]
+    assert (p.domain, p.domain_confidence) == ("acmepc.com", 75)
+    assert [x.npi for x in st.practices(needs_domain=True, state="tx")] == ["2222222222"]
+    assert [x.npi for x in st.practices(min_domain_confidence=50)] == ["1111111111"]
+
+
+def test_csv_domain_overrides_and_sticks(tmp_path):
+    st = Store(str(tmp_path / "t.db"))
+    st.upsert_practices(ingest.read_nppes(FIX))
+    f = tmp_path / "x.csv"
+    f.write_text("npi,name,domain\n2222222222,Bayou Clinic,https://www.bayou.com/\n")
+    st.upsert_practices(ingest.read_csv(str(f)))
+    p = [x for x in st.practices() if x.npi == "2222222222"][0]
+    assert p.domain == "bayou.com"  # URL normalised to a bare host
+    assert p.city == "Houston" and p.phone == "7135550111"  # a sparse CSV must not blank registry fields
+
+
+# ---- domain probing ----
+def test_candidate_domains_order():
+    p = Practice("1", "org", "Acme Primary Care Associates, P.C.", city="Dallas", state="TX")
+    c = domainprobe.candidate_domains(p)
+    assert c[0] == "acmeprimarycareassociates.com" and "acmeprimarycare.com" in c[:6]
+    assert all(d.endswith(".com") for d in c[:6])
+    assert domainprobe.candidate_domains(Practice("1", "org", "AB LLC")) == []  # too short to guess
+
+
+class FakeResolver:
+    def __init__(self, live):
+        self.live = set(live)
+
+    def mx_hosts(self, d):
+        return ["mx"] if d in self.live else None
+
+
+ACME = Practice("1", "org", "Acme Primary Care Associates PC", city="Dallas", state="TX", zip="75201", phone="2145550100")
+
+
+def test_probe_accepts_only_with_identity_evidence():
+    pages = {"https://acmeprimarycare.com/": "<html>Acme Primary Care. Call (214) 555-0100. 100 Main St, Dallas, TX 75201</html>",
+             "https://acme.com/": "<html>Acme Corp: anvils and rockets since 1920</html>"}
+    dom, conf, why = domainprobe.probe(ACME, FakeResolver(["acme.com", "acmeprimarycare.com"]), fetch=pages.get)
+    assert dom == "acmeprimarycare.com" and conf == 100 and "phone" in why
+
+
+def test_probe_rejects_resolving_but_unrelated_and_parked():
+    pages = {"https://acmeprimarycare.com/": "<html>This domain is for sale! Buy now. Dallas</html>"}
+    assert domainprobe.probe(ACME, FakeResolver(["acmeprimarycare.com"]), fetch=pages.get)[0] == ""
+    assert domainprobe.probe(ACME, FakeResolver([]), fetch=lambda u: None)[0] == ""
+
+
+def test_probe_uses_contact_page_and_respects_robots():
+    pages = {"https://acmeprimarycare.com/": "<html>Welcome to Acme Primary Care</html>",
+             "https://acmeprimarycare.com/contact": "Phone 214.555.0100"}
+    assert domainprobe.probe(ACME, FakeResolver(["acmeprimarycare.com"]), fetch=pages.get)[0] == "acmeprimarycare.com"
+    pages["https://acmeprimarycare.com/robots.txt"] = "User-agent: *\nDisallow: /"
+    assert domainprobe.probe(ACME, FakeResolver(["acmeprimarycare.com"]), fetch=pages.get)[0] == ""
 
 
 # ---- pipeline ----
@@ -165,44 +232,157 @@ SITE = {"https://clinic.com/": "Contact: <a href='mailto:billing@clinic.com'>"}
 
 
 def practice(**kw):
-    return Practice("1", "org", "Acme", contact_first="Jane", contact_last="Doe", domain="https://www.clinic.com", **kw)
+    return Practice("1", "org", "Acme", contact_first="Jane", contact_last="Doe", domain="clinic.com",
+                    domain_source="imported", domain_confidence=kw.pop("conf", 100), **kw)
 
 
-def test_pipeline_scraped_plus_verified_pattern():
+def nofetch(u):
+    return "" if u == "https://clinic.com/" else None
+
+
+def test_no_crawl_by_default():
     v = make_validator(MX, mailboxes={"billing@clinic.com", "jane.doe@clinic.com"})
-    p, leads = process_practice(practice(), v, fetch=SITE.get)
-    assert [(l.email, l.source, l.validation.status) for l in leads] == [
-        ("jane.doe@clinic.com", "pattern", "valid"), ("billing@clinic.com", "scraped", "valid")]
-    assert leads[0].score == 85 and leads[1].score == 80  # role address penalised (-15) from 95
+    _, leads = process_practice(practice(), v, fetch=SITE.get)
+    assert [l.email for l in leads] == ["jane.doe@clinic.com"]  # billing@ only shows up with crawl=True
 
 
-def test_pipeline_stops_at_first_accepted_pattern_and_drops_invalid():
+def test_crawl_scraped_plus_verified_pattern_ranking():
+    v = make_validator(MX, mailboxes={"billing@clinic.com", "jane.doe@clinic.com"})
+    _, leads = process_practice(practice(), v, crawl=True, fetch=SITE.get)
+    assert [(l.email, l.source, l.score) for l in leads] == [("jane.doe@clinic.com", "pattern", 85), ("billing@clinic.com", "scraped", 80)]
+
+
+def test_first_accepted_pattern_wins_and_invalid_dropped():
     v = make_validator(MX, mailboxes={"jdoe@clinic.com"})
-    _, leads = process_practice(practice(), v, fetch=lambda u: None if "robots" in u or u != "https://clinic.com/" else "")
+    _, leads = process_practice(practice(), v)
     assert [l.email for l in leads] == ["jdoe@clinic.com"]
-    # guessed jane.doe, jane, jdoe in order; stopped after jdoe
     assert v.calls[:3] == ["jane.doe@clinic.com", "jane@clinic.com", "jdoe@clinic.com"]
 
 
-def test_pipeline_catchall_domain_gets_single_low_confidence_guess():
+def test_catchall_gets_single_low_confidence_guess():
     v = make_validator({"clinic.com": ["mx"]}, catch_all={"clinic.com"})
-    _, leads = process_practice(practice(), v, fetch=lambda u: "" if u == "https://clinic.com/" else None)
+    _, leads = process_practice(practice(), v)
     assert len(leads) == 1 and leads[0].validation.status == "risky" and leads[0].score == 35
 
 
-def test_pipeline_no_smtp_gives_one_unverified_guess():
-    v = make_validator(MX, smtp=False)
-    _, leads = process_practice(practice(), v, fetch=lambda u: "" if u == "https://clinic.com/" else None)
+def test_no_smtp_gives_one_unverified_guess():
+    _, leads = process_practice(practice(), make_validator(MX, smtp=False))
     assert len(leads) == 1 and leads[0].validation.status == "unknown" and leads[0].score == 30
 
 
-def test_pipeline_discovers_domain_and_survives_search_failure():
-    v = make_validator(MX, smtp=False)
-    p = Practice("1", "org", "Acme", city="A", state="TX")
+def test_low_domain_confidence_scales_score_and_no_domain_skips():
+    _, leads = process_practice(practice(conf=60), make_validator(MX, mailboxes={"jane.doe@clinic.com"}))
+    assert leads[0].score == 85 * 60 // 100
+    assert process_practice(Practice("1", "org", "X"), make_validator(MX))[1] == []
 
-    def boom(q):
-        raise RuntimeError("quota")
-    p2, leads = process_practice(p, v, search=boom, fetch=lambda u: None)
-    assert leads == [] and p2.domain == ""
-    p3, _ = process_practice(Practice("1", "org", "Acme"), v, search=lambda q: ["https://acme.com"], fetch=lambda u: None)
-    assert p3.domain == "acme.com"
+
+def test_suppression_and_cache_hooks():
+    v = make_validator(MX, mailboxes={"jane.doe@clinic.com", "jane@clinic.com"})
+    hooks = Hooks(suppressed=lambda e: e == "jane.doe@clinic.com")
+    _, leads = process_practice(practice(), v, hooks=hooks)
+    assert [l.email for l in leads] == ["jane@clinic.com"] and "jane.doe@clinic.com" not in v.calls
+    cached = Hooks(cached=lambda e: Validation(email=e, status="valid", smtp="accepted"))
+    v.calls.clear()
+    _, leads = process_practice(practice(), v, hooks=cached)
+    assert leads[0].email == "jane.doe@clinic.com" and v.calls == []
+
+
+# ---- feedback loop ----
+def seeded_store(tmp_path):
+    st = Store(str(tmp_path / "f.db"))
+    ps = [Practice("A", "org", "Acme Clinic", contact_first="Jane", contact_last="Doe", domain="acme.com", domain_source="imported",
+                   domain_confidence=100, state="TX"),
+          Practice("B", "org", "Acme Clinic North", contact_first="Bob", contact_last="Smith", domain="acme.com",
+                   domain_source="imported", domain_confidence=100, state="TX")]
+    st.upsert_practices(ps)
+    v = make_validator({"acme.com": ["mx"]}, smtp=False)
+    _, leads = process_practice(ps[0], v)
+    st.save_leads("A", leads)
+    return st, leads[0].email
+
+
+def test_bounce_suppresses_and_reply_teaches_pattern(tmp_path):
+    st, email = seeded_store(tmp_path)
+    assert email == "jane.doe@acme.com"
+    assert st.record_feedback(email, "replied") == "{first}.{last}"
+    assert st.learned_template("acme.com") == "{first}.{last}"
+    assert st.lead_rows()[0]["status"] == "valid" and st.lead_rows()[0]["score"] == 100
+    # the colleague at the same domain now gets the learned address at a bonus
+    b = st.practices()[1]
+    _, leads = process_practice(b, make_validator({"acme.com": ["mx"]}, smtp=False),
+                                hooks=Hooks(learned_template=st.learned_template))
+    assert (leads[0].email, leads[0].source) == ("bob.smith@acme.com", "learned")
+    st.record_feedback(email, "bounced")
+    assert st.is_suppressed(email) and st.lead_rows() == []
+    with pytest.raises(ValueError):
+        st.record_feedback(email, "maybe")
+
+
+def test_validation_cache_expiry(tmp_path):
+    st, email = seeded_store(tmp_path)
+    assert st.cached_validation(email).email == email
+    assert st.cached_validation(email, max_age_days=-1) is None
+
+
+# ---- dashboard ----
+def test_dashboard_security_and_feedback(tmp_path):
+    st, email = seeded_store(tmp_path)
+    from http.server import ThreadingHTTPServer
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), None)
+    port = srv.server_address[1]
+    srv.RequestHandlerClass = make_handler(st, "tok123", port)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{port}"
+    try:
+        html = urllib.request.urlopen(base + "/").read().decode()
+        assert email in html and "tok123" in html
+        csv_text = urllib.request.urlopen(base + "/export.csv").read().decode()
+        assert csv_text.splitlines()[0].startswith("practice,") and email in csv_text
+
+        def post(data, host=None):
+            req = urllib.request.Request(base + "/feedback", urllib.parse.urlencode(data).encode(), method="POST")
+            if host:
+                req.add_header("Host", host)
+            return urllib.request.urlopen(req)
+        with pytest.raises(urllib.error.HTTPError) as e:
+            post({"token": "wrong", "email": email, "result": "bounced"})
+        assert e.value.code == 403 and not st.is_suppressed(email)
+        with pytest.raises(urllib.error.HTTPError) as e:  # DNS-rebinding style Host
+            post({"token": "tok123", "email": email, "result": "bounced"}, host="evil.example")
+        assert e.value.code == 403
+        post({"token": "tok123", "email": email, "result": "bounced"})
+        assert st.is_suppressed(email)
+    finally:
+        srv.shutdown()
+
+
+def test_dashboard_escapes_html(tmp_path):
+    st = Store(str(tmp_path / "x.db"))
+    st.upsert_practices([Practice("X", "org", "<script>alert(1)</script>", domain="a.com", domain_source="imported", domain_confidence=100)])
+    st.save_leads("X", [type("L", (), {"email": "a@a.com", "source": "pattern", "score": 50, "validation": Validation("a@a.com")})()])
+    from findmyclient.webui import lead_dicts
+    from http.server import ThreadingHTTPServer
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), None); port = srv.server_address[1]
+    srv.RequestHandlerClass = make_handler(st, "t", port)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        html = urllib.request.urlopen(f"http://127.0.0.1:{port}/").read().decode()
+        assert "<script>alert" not in html and "&lt;script&gt;" in html
+    finally:
+        srv.shutdown()
+
+
+def test_normalize_domain():
+    from findmyclient.models import normalize_domain
+    assert normalize_domain("https://www.Clinic.com/about?x=1") == "clinic.com"
+    assert normalize_domain("Dr@Clinic.com") == "clinic.com" and normalize_domain("") == ""
+
+
+def test_sparse_csv_attaches_domain_to_existing_npi(tmp_path):
+    st = Store(str(tmp_path / "s.db"))
+    st.upsert_practices(ingest.read_nppes(FIX))
+    f = tmp_path / "d.csv"
+    f.write_text("npi,domain\n1111111111,acmepc.com\n,orphan.com\n")  # second row has neither npi nor name: ignored
+    assert st.upsert_practices(ingest.read_csv(str(f))) == 1
+    p = [x for x in st.practices() if x.npi == "1111111111"][0]
+    assert (p.name, p.domain, p.domain_confidence, p.city) == ("Acme Primary Care Associates Pc", "acmepc.com", 100, "Dallas")

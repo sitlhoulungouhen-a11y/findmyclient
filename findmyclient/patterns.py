@@ -39,3 +39,29 @@ def candidates(first: str, last: str, domain: str, limit: int | None = None) -> 
         if addr not in out:
             out.append(addr)
     return out[:limit] if limit else out
+
+
+def infer(local: str, first: str, last: str) -> str | None:
+    """Which template produced `local` for this person? (inverse of candidates())"""
+    f, l = _names(first, last)
+    if not f or not l:
+        return None
+    local = local.lower()
+    for pat in PATTERNS:
+        if pat.format(first=f, last=l, f=f[0], l=l[0]) == local:
+            return pat
+    return None
+
+
+def apply(template: str, first: str, last: str, domain: str) -> str | None:
+    """Build an address for this person from a learned template."""
+    f, l = _names(first, last)
+    if not f or not l or not domain:
+        return None
+    return f"{template.format(first=f, last=l, f=f[0], l=l[0])}@{domain.lower()}"
+
+
+def _names(first: str, last: str) -> tuple[str, str]:
+    fp = first.split()
+    lp = [p for p in re.split(r"[\s,]+", last.strip()) if p and _clean(p) not in _SUFFIXES]
+    return (_clean(fp[0]) if fp else ""), _clean("".join(lp))
