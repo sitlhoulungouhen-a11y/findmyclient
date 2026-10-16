@@ -430,3 +430,57 @@ def test_fetch_failure_names_every_url(tmp_path):
     with pytest.raises(RuntimeError, match="download.cms.gov") as e:
         nppes_fetch.fetch_zip(str(tmp_path), opener=boom)
     assert str(e.value).count("proxy 403") == 3
+
+
+# ---- index discovery + validator fairness ----
+INDEX_HTML = '''<a href="./NPPES_Data_Dissemination_August_2026_V2.zip">Aug</a>
+<a href="./NPPES_Data_Dissemination_September_2026_V2.zip">Sep</a>
+<a href="./NPPES_Data_Dissemination_091426_092026_Weekly_V2.zip">weekly</a>
+<a href="./NPPES_Deactivated_NPI_Report_092226.zip">deact</a>
+<a href="https://download.cms.gov/nppes/NPPES_Data_Dissemination_October_2026_V2.zip">Oct</a>'''
+
+
+def test_index_urls_newest_first_monthly_only():
+    from findmyclient import nppes_fetch
+    got = nppes_fetch.index_urls(INDEX_HTML)
+    assert [u.rsplit("_", 3)[-3] for u in got] == ["October", "September", "August"]
+    assert all(u.startswith("https://download.cms.gov/nppes/") and "Weekly" not in u for u in got)
+
+
+def test_fetch_prefers_index_over_guessed_names(tmp_path):
+    import zipfile
+    from findmyclient import nppes_fetch
+    seen = []
+
+    def opener(url, dest, progress):
+        seen.append(url)
+        if "October_2026_V2" not in url:
+            raise OSError("nope")
+        zipfile.ZipFile(dest, "w").close()
+    nppes_fetch.fetch_zip(str(tmp_path), opener=opener, index=lambda u: INDEX_HTML)
+    assert seen == ["https://download.cms.gov/nppes/NPPES_Data_Dissemination_October_2026_V2.zip"]
+
+
+def test_fetch_falls_back_to_guesses_if_index_down(tmp_path):
+    import urllib.error
+    import zipfile
+    from findmyclient import nppes_fetch
+    seen = []
+
+    def opener(url, dest, progress):
+        seen.append(url)
+        zipfile.ZipFile(dest, "w").close()
+
+    def bad_index(u):
+        raise urllib.error.URLError("down")
+    nppes_fetch.fetch_zip(str(tmp_path), opener=opener, index=bad_index)
+    assert "NPPES_Data_Dissemination_" in seen[0]
+
+
+def test_sender_identity_rejections_are_unknown_not_invalid():
+    for msg in ("MAIL-FROM-REFUSED: 550 Sender domain not found",
+                "5.7.1 Client host rejected: cannot find your reverse hostname",
+                "5.7.1 SPF check failed", "550 5.7.1 Service unavailable; Client host blocked using Spamhaus"):
+        r = make_validator(MX, code_override=(550, msg)).validate("a@clinic.com")
+        assert r.status == "unknown", msg
+    assert make_validator(MX, code_override=(550, "5.1.1 The email account does not exist")).validate("a@clinic.com").status == "invalid"

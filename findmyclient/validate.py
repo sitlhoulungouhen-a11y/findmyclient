@@ -38,6 +38,10 @@ DISPOSABLE = {
 }
 
 
+# Rejections that are about *us* (sender domain, rDNS, SPF, HELO, reputation), not the mailbox.
+_OUR_FAULT = re.compile(r"sender|helo|ehlo|rdns|reverse|hostname|client host|your ip|ip address|ptr\b|spf|dmarc|relay|not authenticated|blocked|spamhaus|reputation|blacklist|blocklist|\brbl\b|dnsbl", re.I)
+
+
 class Resolver(Protocol):
     def mx_hosts(self, domain: str) -> list[str] | None:
         """MX hosts by preference. [] = domain exists but accepts no mail. None = no such domain / DNS failure."""
@@ -84,8 +88,8 @@ def smtp_probe(mx: str, address: str, helo: str, mail_from: str, timeout: float)
             s.connect(mx, 25)
             s.ehlo_or_helo_if_needed()
             code, msg = s.mail(mail_from)
-            if code >= 400:
-                return code, msg.decode(errors="replace")
+            if code >= 400:  # refused before we even named the mailbox: says nothing about the mailbox
+                return code, "MAIL-FROM-REFUSED: " + msg.decode(errors="replace")
             code, msg = s.rcpt(address)
             return code, msg.decode(errors="replace")
     except (OSError, smtplib.SMTPException, socket.timeout) as e:
@@ -176,6 +180,8 @@ class Validator:
                 v.status, v.reason = "unknown", "accepted but catch-all test inconclusive"
             else:
                 v.status, v.reason = "valid", "mailbox accepted by server"
+        elif msg.startswith("MAIL-FROM-REFUSED") or _OUR_FAULT.search(msg):
+            v.smtp, v.status, v.reason = "unknown", "unknown", f"server objected to our sender/IP, not the mailbox: {msg[:80]}"
         elif code in (550, 551, 553, 501, 511):  # unknown user / bad mailbox
             v.smtp, v.status, v.reason = "rejected", "invalid", f"mailbox rejected: {msg[:80]}"
         elif code >= 500:

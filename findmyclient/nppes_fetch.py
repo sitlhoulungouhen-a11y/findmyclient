@@ -8,6 +8,7 @@ import os
 import re
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 from typing import Callable, Iterator
@@ -22,6 +23,35 @@ def monthly_urls(today: dt.date | None = None, months: int = 3) -> Iterator[str]
     for _ in range(months):
         yield f"{BASE}NPPES_Data_Dissemination_{d.strftime('%B')}_{d.year}.zip"
         d = (d - dt.timedelta(days=1)).replace(day=1)
+
+
+INDEX_URL = BASE + "NPI_Files.html"
+_ZIP_HREF = re.compile(r'href="([^"]*NPPES_Data_Dissemination[^"]*\.zip)"', re.I)
+_MONTHS = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"]
+
+
+def index_urls(html: str) -> list[str]:
+    """Full-replacement monthly zips linked from CMS's download page, newest first.
+
+    Reading the page (instead of guessing a file name) survives CMS renaming the file, e.g. adding a _V2 suffix.
+    Weekly increments and deactivation lists are excluded.
+    """
+    def key(url: str) -> tuple[int, int]:
+        m = re.search(r"_([A-Za-z]+)_(\d{4})", url)
+        return (int(m.group(2)), _MONTHS.index(m.group(1).lower()) if m and m.group(1).lower() in _MONTHS else -1) if m else (0, -1)
+
+    urls = []
+    for href in _ZIP_HREF.findall(html):
+        if re.search(r"weekly|deactiv", href, re.I):
+            continue
+        urls.append(urllib.parse.urljoin(INDEX_URL, href))
+    return sorted(dict.fromkeys(urls), key=key, reverse=True)
+
+
+def _http_text(url: str) -> str:
+    req = urllib.request.Request(url, headers={"User-Agent": "findmyclient/0.1"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return r.read().decode("utf-8", errors="replace")
 
 
 def download(url: str, dest: str, progress: Callable[[int, int], None] | None = None) -> None:
@@ -47,7 +77,8 @@ def open_npidata(zip_path: str):
 
 
 def fetch_zip(workdir: str, url: str | None = None, today: dt.date | None = None,
-              opener: Callable[[str, str, Callable | None], None] = download) -> str:
+              opener: Callable[[str, str, Callable | None], None] = download,
+              index: Callable[[str], str] = _http_text) -> str:
     """Download the newest available monthly zip; returns its path."""
     os.makedirs(workdir, exist_ok=True)
     zip_path = os.path.join(workdir, "nppes.zip")
@@ -57,7 +88,14 @@ def fetch_zip(workdir: str, url: str | None = None, today: dt.date | None = None
             print(f"\r  downloading {done >> 20}/{total >> 20} MB", end="", file=sys.stderr, flush=True)
 
     tried = []
-    for u in ([url] if url else list(monthly_urls(today))):
+    candidates = [url] if url else []
+    if not url:
+        try:
+            candidates = index_urls(index(INDEX_URL))[:3]
+        except (urllib.error.URLError, OSError) as e:
+            tried.append(f"{INDEX_URL}: {e}")
+        candidates += [u for u in monthly_urls(today) if u not in candidates]  # last resort: guessed names
+    for u in candidates:
         try:
             opener(u, zip_path, bar)
             print(file=sys.stderr)
