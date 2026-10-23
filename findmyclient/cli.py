@@ -60,6 +60,8 @@ def cmd_import_csv(args, store: Store) -> None:
 
 
 def cmd_domains(args, store: Store) -> None:
+    if store.stats()["practices"] == 0:
+        return _eprint("the database has no practices yet. Run `fetch-nppes` or `import-nppes` first.")
     todo = store.practices(state=args.state, needs_domain=True, unchecked_domains=not args.retry, limit=args.limit)
     todo = [p for p in todo if p.kind == "org" or args.individuals]
     if not todo:

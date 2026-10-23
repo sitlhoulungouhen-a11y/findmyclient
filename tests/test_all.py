@@ -392,8 +392,10 @@ def test_sparse_csv_attaches_domain_to_existing_npi(tmp_path):
 def test_monthly_urls_roll_back_across_year():
     import datetime
     from findmyclient import nppes_fetch
-    urls = list(nppes_fetch.monthly_urls(datetime.date(2027, 1, 15)))
-    assert [u.rsplit("_", 2)[-2:] for u in urls] == [["January", "2027.zip"], ["December", "2026.zip"], ["November", "2026.zip"]]
+    urls = list(nppes_fetch.monthly_urls(datetime.date(2027, 1, 15), months=2))
+    assert [u.split("/")[-1] for u in urls] == [
+        "NPPES_Data_Dissemination_January_2027_V2.zip", "NPPES_Data_Dissemination_January_2027.zip",
+        "NPPES_Data_Dissemination_December_2026_V2.zip", "NPPES_Data_Dissemination_December_2026.zip"]
 
 
 def test_fetch_streams_main_file_not_header_and_falls_back(tmp_path):
@@ -428,8 +430,9 @@ def test_fetch_failure_names_every_url(tmp_path):
     def boom(url, dest, progress):
         raise urllib.error.URLError("proxy 403")
     with pytest.raises(RuntimeError, match="download.cms.gov") as e:
-        nppes_fetch.fetch_zip(str(tmp_path), opener=boom)
-    assert str(e.value).count("proxy 403") == 3
+        nppes_fetch.fetch_zip(str(tmp_path), opener=boom, index=lambda u: (_ for _ in ()).throw(OSError("no index")))
+    msg = str(e.value)
+    assert "October_2026_V2.zip" in msg and "August_2026.zip" in msg and msg.count("proxy 403") == 6
 
 
 # ---- index discovery + validator fairness ----
@@ -484,3 +487,11 @@ def test_sender_identity_rejections_are_unknown_not_invalid():
         r = make_validator(MX, code_override=(550, msg)).validate("a@clinic.com")
         assert r.status == "unknown", msg
     assert make_validator(MX, code_override=(550, "5.1.1 The email account does not exist")).validate("a@clinic.com").status == "invalid"
+
+
+def test_monthly_urls_try_v2_names_first():
+    import datetime
+    from findmyclient import nppes_fetch
+    urls = list(nppes_fetch.monthly_urls(datetime.date(2026, 10, 16), months=1))
+    assert urls == ["https://download.cms.gov/nppes/NPPES_Data_Dissemination_October_2026_V2.zip",
+                    "https://download.cms.gov/nppes/NPPES_Data_Dissemination_October_2026.zip"]

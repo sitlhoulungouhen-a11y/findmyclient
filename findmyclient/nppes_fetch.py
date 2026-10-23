@@ -21,7 +21,9 @@ def monthly_urls(today: dt.date | None = None, months: int = 3) -> Iterator[str]
     """Newest first. CMS posts the monthly file near the start of the month, so also try prior months."""
     d = (today or dt.date.today()).replace(day=1)
     for _ in range(months):
-        yield f"{BASE}NPPES_Data_Dissemination_{d.strftime('%B')}_{d.year}.zip"
+        # CMS has published both plain and _V2 names; the _V2 name is what the live page links to.
+        for suffix in ("_V2", ""):
+            yield f"{BASE}NPPES_Data_Dissemination_{d.strftime('%B')}_{d.year}{suffix}.zip"
         d = (d - dt.timedelta(days=1)).replace(day=1)
 
 
